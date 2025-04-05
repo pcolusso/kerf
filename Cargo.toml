@@ -1,0 +1,15 @@
+[package]
+name = "kerf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.97"
+aws-config = { version = "1.6.1", features = ["behavior-version-latest"] }
+aws-sdk-cloudwatch = "1.70.0"
+clap = { version = "4.5.35", features = ["derive"] }
+crossterm = { version = "0.29.0", features = ["event-stream"] }
+futures = "0.3.31"
+ratatui = "0.29.0"
+tokio = { version = "1.44.2", features = ["full"] }
+tokio-util = "0.7.14"
