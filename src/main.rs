@@ -16,17 +16,8 @@ struct Config {
 async fn main() -> Result<()> {
     let config = Config::parse();
 
-    let mut cw = cw::Logs::new(config.log_group_name).await;
-    for (x, y) in cw.get_more_logs().await {
-        let msg = if let Some(snip) = config.snip {
-            y.chars().skip(snip).collect::<String>()
-        } else {
-            y
-        };
-        println!("{}: {}", x, msg);
-    }
-
-    //ui::run().await?;
+    let cw = cw::Logs::new(config.log_group_name).await;
+    ui::run(cw).await?;
 
     Ok(())
 }

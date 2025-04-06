@@ -1,5 +1,6 @@
 use aws_sdk_cloudwatchlogs as cwl;
 
+#[derive(Clone)]
 pub struct Logs {
     client: cwl::Client,
     group: String,

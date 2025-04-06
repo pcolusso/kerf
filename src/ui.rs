@@ -6,28 +6,83 @@ use ratatui::{
     text::Line,
     widgets::{Block, Paragraph},
 };
-use anyhow::Result;
+use anyhow::{Error, Result};
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 
-pub async fn run() -> Result<()> {
+use crate::cw::Logs;
+
+pub async fn run(logs: Logs) -> Result<()> {
     let terminal = ratatui::init();
-    App::new().run(terminal).await?;
+    App::new(logs).run(terminal).await?;
     ratatui::restore();
 
     Ok(())
 }
 
-#[derive(Debug, Default)]
+// TODO: move to utils?
+struct Chan<T> {
+    rx: Receiver<T>,
+    tx: Sender<T>,
+}
+
+impl<T> From<(Sender<T>, Receiver<T>)> for Chan<T> {
+    fn from((tx, rx): (Sender<T>, Receiver<T>)) -> Self {
+        Self { rx, tx }
+    }
+}
+
+#[derive()]
 pub struct App {
     /// Is the application running?
     running: bool,
     // Event stream.
     event_stream: EventStream,
+    client: Logs,
+    data_chan: Chan<Data>,
+    error_chan: Chan<Error>,
+    status: Status,
+    rows: Vec<(i64, String)>,
+}
+
+enum Data {
+    Logs(Vec<(i64, String)>),
+}
+
+enum Status {
+    Loading,
+    Loaded,
+    Failed(Error),
 }
 
 impl App {
     /// Construct a new instance of [`App`].
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(client: Logs) -> Self {
+        let event_stream = EventStream::default();
+        let running = false;
+        let data_chan = channel::<Data>(10).into();
+        let error_chan = channel::<Error>(10).into();
+        let status = Status::Loading;
+        let rows = Vec::new();
+
+        let mut res = Self { running, event_stream, client, data_chan, error_chan, status, rows };
+        res.load_more();
+
+        res
+    }
+
+    // Wrap the async function, spawn it and send it's results back via channels.
+    fn load_more(&mut self) {
+        self.status = Status::Loading;
+        let data_tx = self.data_chan.tx.clone();
+        let err_tx = self.error_chan.tx.clone();
+        let mut logs = self.client.clone();
+        tokio::spawn(async move {
+            let result = logs.get_more_logs().await;
+            let wrapped = Data::Logs(result);
+            if let Err(e) = data_tx.send(wrapped).await {
+                err_tx.send(anyhow::anyhow!(e)).await.expect("Failed to send error, something's fucked!");
+            }
+        });
     }
 
     /// Run the application's main loop.
@@ -78,6 +133,20 @@ impl App {
                     }
                     _ => {}
                 }
+            }
+            err = self.error_chan.rx.recv() => {
+                if let Some(err) = err {
+                    self.status = Status::Failed(err);
+                }
+            }
+            data = self.data_chan.rx.recv() => {
+                match data {
+                    Some(Data::Logs(logs)) => {
+                        // TODO!
+                    }
+                    None => {}
+                }
+                self.status = Status::Loaded;
             }
             _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
                 // Sleep for a short duration to avoid busy waiting.
