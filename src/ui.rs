@@ -1,10 +1,7 @@
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::{FutureExt, StreamExt};
 use ratatui::{
-    DefaultTerminal, Frame,
-    style::Stylize,
-    text::Line,
-    widgets::{Block, Paragraph},
+    layout::{Constraint, Direction, Layout}, style::Stylize, text::Line, widgets::{Block, Borders, List, ListItem, Paragraph}, DefaultTerminal, Frame
 };
 use anyhow::{Error, Result};
 use tokio::sync::mpsc::{Receiver, Sender, channel};
@@ -100,20 +97,33 @@ impl App {
     /// This is where you add new widgets. See the following resources for more information:
     /// - <https://docs.rs/ratatui/latest/ratatui/widgets/index.html>
     /// - <https://github.com/ratatui/ratatui/tree/master/examples>
-    fn draw(&mut self, frame: &mut Frame) {
-        let title = Line::from("Ratatui Simple Template")
-            .bold()
-            .blue()
-            .centered();
-        let text = "Hello, Ratatui!\n\n\
-            Created using https://github.com/ratatui/templates\n\
-            Press `Esc`, `Ctrl-C` or `q` to stop running.";
-        frame.render_widget(
-            Paragraph::new(text)
-                .block(Block::bordered().title(title))
-                .centered(),
-            frame.area(),
-        )
+    fn draw(&mut self, f: &mut Frame) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .margin(1)
+            .constraints(
+                [
+                    Constraint::Percentage(80),
+                    Constraint::Length(3),
+                ]
+                .as_ref(),
+            )
+            .split(f.size());
+        let list_items: Vec<ListItem> = self.rows
+            .iter()
+            .map(|i| ListItem::new(i.1.clone())) // TODO: ARGH!
+            .collect();
+        let s = match self.status {
+            Status::Loaded => "".into(),
+            Status::Loading => " (Loading...)".into(),
+            Status::Failed(ref e) => format!("Error: {}", e),
+        };
+        let list = List::new(list_items)
+            .block(Block::default().borders(Borders::ALL).title(format!("Results{}", s)));
+        f.render_widget(list, chunks[0]);
+        let input_paragraph = Paragraph::new("")
+            .block(Block::default().borders(Borders::ALL).title("Query"));
+        f.render_widget(input_paragraph, chunks[1]);
     }
 
     /// Reads the crossterm events and updates the state of [`App`].
@@ -141,8 +151,8 @@ impl App {
             }
             data = self.data_chan.rx.recv() => {
                 match data {
-                    Some(Data::Logs(logs)) => {
-                        // TODO!
+                    Some(Data::Logs(mut logs)) => {
+                        self.rows.append(&mut logs);
                     }
                     None => {}
                 }
