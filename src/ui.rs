@@ -1,7 +1,7 @@
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind};
 use futures::{FutureExt, StreamExt};
 use ratatui::{
-    layout::{Constraint, Direction, Layout}, style::Stylize, text::Line, widgets::{Block, Borders, List, ListItem, Paragraph}, DefaultTerminal, Frame
+    layout::{Constraint, Direction, Layout, Rect}, style::{Color, Style, Stylize}, widgets::{Block, Borders, List, ListItem, ListState, Paragraph}, DefaultTerminal, Frame
 };
 use anyhow::{Error, Result};
 use tokio::sync::mpsc::{Receiver, Sender, channel};
@@ -28,6 +28,14 @@ impl<T> From<(Sender<T>, Receiver<T>)> for Chan<T> {
     }
 }
 
+const fn alternate_colors(i: usize) -> Color {
+    if i % 2 == 0 {
+        Color::DarkGray
+    } else {
+        Color::Black
+    }
+}
+
 #[derive()]
 pub struct App {
     /// Is the application running?
@@ -38,7 +46,16 @@ pub struct App {
     data_chan: Chan<Data>,
     error_chan: Chan<Error>,
     status: Status,
-    rows: Vec<(i64, String)>,
+    query: String,
+    rows: DataList
+}
+
+
+type Log = (i64, String);
+
+struct DataList {
+    pub items: Vec<Log>,
+    pub state: ListState
 }
 
 enum Data {
@@ -59,9 +76,10 @@ impl App {
         let data_chan = channel::<Data>(10).into();
         let error_chan = channel::<Error>(10).into();
         let status = Status::Loading;
-        let rows = Vec::new();
+        let rows = DataList { items: Vec::new(), state: ListState::default() };
+        let query = "".into();
 
-        let mut res = Self { running, event_stream, client, data_chan, error_chan, status, rows };
+        let mut res = Self { running, event_stream, client, data_chan, error_chan, status, rows, query };
         res.load_more();
 
         res
@@ -103,28 +121,49 @@ impl App {
             .margin(1)
             .constraints(
                 [
-                    Constraint::Percentage(80),
+                    Constraint::Fill(1),
                     Constraint::Length(3),
+                    Constraint::Length(1)
                 ]
                 .as_ref(),
             )
-            .split(f.size());
-        let list_items: Vec<ListItem> = self.rows
-            .iter()
-            .map(|i| ListItem::new(i.1.clone())) // TODO: ARGH!
-            .collect();
-        let s = match self.status {
-            Status::Loaded => "".into(),
-            Status::Loading => " (Loading...)".into(),
-            Status::Failed(ref e) => format!("Error: {}", e),
-        };
-        let list = List::new(list_items)
-            .block(Block::default().borders(Borders::ALL).title(format!("Results{}", s)));
-        f.render_widget(list, chunks[0]);
-        let input_paragraph = Paragraph::new("")
+            .split(f.area());
+
+        self.render_list(chunks[0], f);
+
+        let input_paragraph = Paragraph::new(self.query.clone())
             .block(Block::default().borders(Borders::ALL).title("Query"));
         f.render_widget(input_paragraph, chunks[1]);
+
+        let s = match self.status {
+            Status::Loaded => " Done".into(),
+            Status::Loading => " Loading...".into(),
+            Status::Failed(ref e) => format!(" Error: {}", e),
+        };
+        let status_line = Paragraph::new(s)
+            .fg(Color::White)
+            .bg(Color::Blue);
+        f.render_widget(status_line, chunks[2]);
     }
+
+    fn render_list(&mut self, area: Rect, f: &mut Frame) {
+        let list_items: Vec<ListItem> = self.rows.items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let c = alternate_colors(i);
+                ListItem::from(item.1.clone())
+            })
+            .collect();
+
+        let list = List::new(list_items)
+            .block(Block::default()
+            .borders(Borders::ALL)
+            .title("Results"))
+            .highlight_style(Style::new().bg(Color::DarkGray));
+        f.render_stateful_widget(list, area, &mut self.rows.state);
+    }
+
 
     /// Reads the crossterm events and updates the state of [`App`].
     async fn handle_crossterm_events(&mut self) -> Result<()> {
@@ -151,16 +190,17 @@ impl App {
             }
             data = self.data_chan.rx.recv() => {
                 match data {
-                    Some(Data::Logs(mut logs)) => {
-                        self.rows.append(&mut logs);
+                    Some(Data::Logs(logs)) => {
+                        self.rows.items = logs;
+                        self.rows.state.select_first();
                     }
                     None => {}
                 }
                 self.status = Status::Loaded;
             }
-            _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
-                // Sleep for a short duration to avoid busy waiting.
-            }
+            // _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
+            //     // Sleep for a short duration to avoid busy waiting.
+            // }
         }
         Ok(())
     }
@@ -168,8 +208,13 @@ impl App {
     /// Handles the key events and updates the state of [`App`].
     fn on_key_event(&mut self, key: KeyEvent) {
         match (key.modifiers, key.code) {
-            (_, KeyCode::Esc | KeyCode::Char('q'))
-            | (KeyModifiers::CONTROL, KeyCode::Char('c') | KeyCode::Char('C')) => self.quit(),
+            (_, KeyCode::Esc) => self.quit(),
+            (_, KeyCode::Down) => self.rows.state.select_next(),
+            (_, KeyCode::Up) => self.rows.state.select_previous(),
+            (_, KeyCode::Char(a)) => {
+                self.query.push(a);
+            },
+            (_, KeyCode::Backspace) => { let _ = self.query.pop(); },
             // Add other key handlers here.
             _ => {}
         }

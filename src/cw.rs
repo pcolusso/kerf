@@ -8,6 +8,7 @@ pub struct Logs {
     next_token: Option<String>,
 }
 
+// This looks a lot like an iterator, or a cursor...
 impl Logs {
     pub async fn new(group: String) -> Self {
         let config = aws_config::load_from_env().await;
