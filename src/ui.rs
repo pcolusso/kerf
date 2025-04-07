@@ -1,10 +1,12 @@
+use std::{future::Future, time::Duration};
+
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind};
 use futures::{FutureExt, StreamExt};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect}, style::{Color, Style, Stylize}, widgets::{Block, Borders, List, ListItem, ListState, Paragraph}, DefaultTerminal, Frame
 };
 use anyhow::{Error, Result};
-use tokio::sync::mpsc::{Receiver, Sender, channel};
+use tokio::{sync::mpsc::{channel, Receiver, Sender}, task::JoinHandle, time::sleep};
 
 use crate::cw::Logs;
 
@@ -36,18 +38,26 @@ const fn alternate_colors(i: usize) -> Color {
     }
 }
 
+enum Modal {
+    Hidden,
+    Visible(i64)
+}
+
 #[derive()]
 pub struct App {
-    /// Is the application running?
+    // Is the application running?
+    // gee i sure hope so
     running: bool,
-    // Event stream.
     event_stream: EventStream,
     client: Logs,
     data_chan: Chan<Data>,
     error_chan: Chan<Error>,
+    fut: Option<JoinHandle<()>>,
+    modal: Modal,
     status: Status,
     query: String,
-    rows: DataList
+    rows: DataList,
+    ctx_rows: Vec<String>
 }
 
 
@@ -60,6 +70,7 @@ struct DataList {
 
 enum Data {
     Logs(Vec<(i64, String)>),
+    Context(Vec<String>)
 }
 
 enum Status {
@@ -67,6 +78,9 @@ enum Status {
     Loaded,
     Failed(Error),
 }
+
+type LoadFn = Box<dyn FnOnce(Logs, Sender<Data>, Sender<Error>) -> Box<dyn Future<Output = ()> + Send + 'static> + Send + 'static>;
+
 
 impl App {
     /// Construct a new instance of [`App`].
@@ -78,22 +92,53 @@ impl App {
         let status = Status::Loading;
         let rows = DataList { items: Vec::new(), state: ListState::default() };
         let query = "".into();
+        let fut = None;
+        let modal = Modal::Hidden;
+        let ctx_rows = Vec::new();
 
-        let mut res = Self { running, event_stream, client, data_chan, error_chan, status, rows, query };
+        let mut res = Self { ctx_rows, modal, fut, running, event_stream, client, data_chan, error_chan, status, rows, query };
         res.load_more();
 
         res
     }
 
+
+
     // Wrap the async function, spawn it and send it's results back via channels.
-    fn load_more(&mut self) {
+    fn load<F, Fut>(&mut self, act: F)
+        where F: FnOnce(Logs, Sender<Data>, Sender<Error>) -> Fut + 'static + Send,
+              Fut: Future<Output = ()> + Send + 'static
+    {
         self.status = Status::Loading;
+        if let Some(f) = self.fut.take() {
+            f.abort();
+        }
+
         let data_tx = self.data_chan.tx.clone();
         let err_tx = self.error_chan.tx.clone();
-        let mut logs = self.client.clone();
-        tokio::spawn(async move {
+        let logs = self.client.clone();
+        self.fut = Some(tokio::spawn(async move {
+            sleep(Duration::from_millis(33)).await;
+            act(logs, data_tx, err_tx).await;
+        }))
+    }
+
+    fn load_more(&mut self) {
+        let q = self.query.clone();
+        self.load(|mut logs, data_tx, err_tx| async move  {
+            logs.set_query(q);
             let result = logs.get_more_logs().await;
             let wrapped = Data::Logs(result);
+            if let Err(e) = data_tx.send(wrapped).await {
+                err_tx.send(anyhow::anyhow!(e)).await.expect("Failed to send error, something's fucked!");
+            }
+        });
+    }
+
+    fn load_context(&mut self, ts: i64) {
+        self.load(move |mut logs, data_tx, err_tx| async move {
+            let result = logs.find_context(ts).await;
+            let wrapped = Data::Context(result);
             if let Err(e) = data_tx.send(wrapped).await {
                 err_tx.send(anyhow::anyhow!(e)).await.expect("Failed to send error, something's fucked!");
             }
@@ -110,11 +155,10 @@ impl App {
         Ok(())
     }
 
-    /// Renders the user interface.
-    ///
-    /// This is where you add new widgets. See the following resources for more information:
-    /// - <https://docs.rs/ratatui/latest/ratatui/widgets/index.html>
-    /// - <https://github.com/ratatui/ratatui/tree/master/examples>
+    fn draw_modal(&self, f: &mut Frame) {
+
+    }
+
     fn draw(&mut self, f: &mut Frame) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -130,6 +174,13 @@ impl App {
             .split(f.area());
 
         self.render_list(chunks[0], f);
+
+        match self.modal {
+            Modal::Visible(_) => {
+                self.draw_modal(f);
+            }
+            Modal::Hidden => {}
+        }
 
         let input_paragraph = Paragraph::new(self.query.clone())
             .block(Block::default().borders(Borders::ALL).title("Query"));
@@ -193,7 +244,11 @@ impl App {
                     Some(Data::Logs(logs)) => {
                         self.rows.items = logs;
                         self.rows.state.select_first();
-                    }
+                    },
+                    Some(Data::Context(ctx)) => {
+                        self.ctx_rows = ctx;
+                        self.rows.state.select_last();
+                    },
                     None => {}
                 }
                 self.status = Status::Loaded;
@@ -208,13 +263,37 @@ impl App {
     /// Handles the key events and updates the state of [`App`].
     fn on_key_event(&mut self, key: KeyEvent) {
         match (key.modifiers, key.code) {
-            (_, KeyCode::Esc) => self.quit(),
+            (_, KeyCode::Esc) => {
+                match self.modal {
+                    Modal::Hidden => self.quit(),
+                    Modal::Visible(_) => {
+                        self.modal = Modal::Hidden;
+                    }
+                }
+                self.quit();
+            },
             (_, KeyCode::Down) => self.rows.state.select_next(),
             (_, KeyCode::Up) => self.rows.state.select_previous(),
             (_, KeyCode::Char(a)) => {
-                self.query.push(a);
+                if matches!(self.modal, Modal::Hidden) {
+                    self.query.push(a);
+                    self.load_more();
+                }
             },
-            (_, KeyCode::Backspace) => { let _ = self.query.pop(); },
+            (_, KeyCode::Backspace) => {
+                if matches!(self.modal, Modal::Hidden) {
+                    let _ = self.query.pop();
+                    self.load_more();
+                }
+            },
+            (_, KeyCode::Enter) => {
+                let selected = self.rows.state.selected();
+                if let Some(selected) = selected {
+                    let ts = self.rows.items[selected].0;
+                    self.modal = Modal::Visible(ts);
+                    self.load_context(ts);
+                }
+            },
             // Add other key handlers here.
             _ => {}
         }

@@ -22,6 +22,25 @@ impl Logs {
         self.next_token = None;
     }
 
+    pub async fn find_context(&mut self, middle: i64) -> Vec<String> {
+        let start_time = middle - 1000;
+        let end_time = middle + 1000;
+        let req = self.client.get_log_events()
+            .log_group_name(&self.group)
+            .start_time(start_time)
+            .end_time(end_time)
+            .limit(40)
+            .set_next_token(self.next_token.clone());
+        let res = req.send().await.unwrap();
+        let mut evts = Vec::new();
+        for event in res.events() {
+            if let Some(y) = event.message() {
+                evts.push(y.to_owned());
+            }
+        }
+        evts
+    }
+
     // idk, should we handle back & forward? For now, assume ALWAYS FORWARD
     pub async fn get_more_logs(&mut self) -> Vec<(i64, String)> {
         let req = self.client.filter_log_events()
