@@ -51,6 +51,10 @@ struct SearchState {
 
 impl SearchState {
     fn draw(&mut self, area: Rect, f: &mut Frame) {
+        let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Fill(1), Constraint::Length(3)].as_ref())
+                .split(area);
         let list_items: Vec<ListItem> = self.items
             .iter()
             .map(|item| ListItem::from(item.1.clone()))
@@ -61,9 +65,12 @@ impl SearchState {
             .borders(Borders::ALL)
             .title("Results"))
             .highlight_style(Style::new().bg(Color::DarkGray));
-        f.render_stateful_widget(list, area, &mut self.state);
-    }
+        f.render_stateful_widget(list, chunks[0], &mut self.state);
 
+        let input_paragraph = Paragraph::new(self.query.clone()) // ARGH
+            .block(Block::default().borders(Borders::ALL).title("Query"));
+        f.render_widget(input_paragraph, chunks[1]);
+    }
 }
 
 #[derive(Default)]
@@ -76,13 +83,14 @@ struct ViewState {
 
 impl ViewState {
     fn draw(&mut self, f: &mut Frame) {
-        let area = popup_area(f.area(), 90, 90);
-        let block = Block::bordered().title("Modal");
-        let list = List::new(self.items.iter().map(|row| {
-            ListItem::new(row.to_string())
-        })).block(block);
+        let area = popup_area(f.area(), 95, 95);
+        // TODO: Format as date
+        let block = Block::bordered().title(format!("Viewing context: {} +/- 1000", self.selected_ts));
+        let list = List::new(self.items.iter().map(|row| {ListItem::new(row.to_string())}))
+            .highlight_style(Style::new().bg(Color::DarkGray))
+            .block(block);
         f.render_widget(Clear, area);
-        f.render_widget(list, area);
+        f.render_stateful_widget(list, area, &mut self.state);
     }
 }
 
@@ -194,40 +202,28 @@ impl App {
     }
 
     fn draw(&mut self, f: &mut Frame) {
+        let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Fill(1), Constraint::Length(1)].as_ref())
+                .split(f.area());
         match &mut self.mode {
+            Mode::Searching(ref mut s) => {
+                s.draw(chunks[0], f);
+            },
             Mode::Viewing(ref mut v) => {
+                v.prev.draw(chunks[0], f);
                 v.draw(f);
             }
-            Mode::Searching(ref mut s) => {
-                let chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .margin(1)
-                    .constraints(
-                        [
-                            Constraint::Fill(1),
-                            Constraint::Length(3),
-                            Constraint::Length(1)
-                        ]
-                        .as_ref(),
-                    )
-                    .split(f.area());
-                s.draw(chunks[0], f);
-
-                let input_paragraph = Paragraph::new(s.query.clone()) // ARGH
-                    .block(Block::default().borders(Borders::ALL).title("Query"));
-                f.render_widget(input_paragraph, chunks[1]);
-
-                let s = match self.status {
-                    Status::Loaded => " Done".into(),
-                    Status::Loading => " Loading...".into(),
-                    Status::Failed(ref e) => format!(" Error: {}", e),
-                };
-                let status_line = Paragraph::new(s)
-                    .fg(Color::White)
-                    .bg(Color::Blue);
-                f.render_widget(status_line, chunks[2]);
-            }
         }
+        let s = match self.status {
+            Status::Loaded => " Done".into(),
+            Status::Loading => " Loading...".into(),
+            Status::Failed(ref e) => format!(" Error: {}", e),
+        };
+        let status_line = Paragraph::new(s)
+            .fg(Color::White)
+            .bg(Color::Blue);
+        f.render_widget(status_line, chunks[1]);
     }
 
     /// Reads the crossterm events and updates the state of [`App`].
@@ -271,11 +267,6 @@ impl App {
                 }
                 self.status = Status::Loaded;
             }
-            // Disabled, because I don't think we have any ticker based functionality.
-            // So, in theory, absent of input or network activity, we should have almost zero CPU?
-            // _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
-            //     // Sleep for a short duration to avoid busy waiting.
-            // }
         }
         Ok(())
     }
@@ -293,7 +284,9 @@ impl App {
             },
             (Mode::Searching(s), KeyCode::Down) => s.state.select_next(),
             (Mode::Searching(s), KeyCode::Up) => s.state.select_previous(),
-            (Mode::Searching(s), KeyCode::Char(a)) => {
+            (Mode::Viewing(v), KeyCode::Down) => v.state.select_next(),
+            (Mode::Viewing(v), KeyCode::Up) => v.state.select_previous(),
+            (Mode::Searching(s), KeyCode::Char(a)) if a.is_alphanumeric() => {
                 s.query.push(a);
                 let q = s.query.clone();
                 self.load_more(q);
