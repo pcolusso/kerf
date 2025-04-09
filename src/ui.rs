@@ -1,4 +1,4 @@
-use std::{future::Future, sync::{Arc}, time::Duration};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind};
 use futures::{FutureExt, StreamExt};
@@ -10,8 +10,10 @@ use tokio::{sync::{mpsc::{channel, Receiver, Sender}, Mutex}, task::JoinHandle, 
 
 use crate::cw::Logs;
 
+// Mnemonic for Rust's most annoying type
 type Z<T> = Arc<tokio::sync::Mutex<T>>;
 
+// Entrypoint for the UI.
 pub async fn run(logs: Logs) -> Result<()> {
     let terminal = ratatui::init();
     App::new(logs).run(terminal).await?;
@@ -20,7 +22,8 @@ pub async fn run(logs: Logs) -> Result<()> {
     Ok(())
 }
 
-// TODO: move to utils?
+// Helper to hold both sides of a channel. We need to retain the receiver, and hand out clones of
+// the sender.
 struct Chan<T> {
     rx: Receiver<T>,
     tx: Sender<T>,
@@ -32,9 +35,61 @@ impl<T> From<(Sender<T>, Receiver<T>)> for Chan<T> {
     }
 }
 
-enum Modal {
-    Hidden,
-    Visible(i64)
+enum Mode {
+    Searching(SearchState),
+    Viewing(ViewState)
+}
+
+type Log = (i64, String);
+
+#[derive(Default)]
+struct SearchState {
+    query: String,
+    items: Vec<Log>,
+    state: ListState
+}
+
+impl SearchState {
+    fn draw(&mut self, area: Rect, f: &mut Frame) {
+        let list_items: Vec<ListItem> = self.items
+            .iter()
+            .map(|item| ListItem::from(item.1.clone()))
+            .collect();
+
+        let list = List::new(list_items)
+            .block(Block::default()
+            .borders(Borders::ALL)
+            .title("Results"))
+            .highlight_style(Style::new().bg(Color::DarkGray));
+        f.render_stateful_widget(list, area, &mut self.state);
+    }
+
+}
+
+#[derive(Default)]
+struct ViewState {
+    prev: SearchState,
+    items: Vec<String>,
+    state: ListState,
+    selected_ts: i64
+}
+
+impl ViewState {
+    fn draw(&mut self, f: &mut Frame) {
+        let area = popup_area(f.area(), 90, 90);
+        let block = Block::bordered().title("Modal");
+        let list = List::new(self.items.iter().map(|row| {
+            ListItem::new(row.to_string())
+        })).block(block);
+        f.render_widget(Clear, area);
+        f.render_widget(list, area);
+    }
+}
+
+// Data channel messages
+enum Data {
+    Logs(Vec<(i64, String)>),
+    Context(Vec<String>)
 }
 
 // Made a proper mess of this state... Some enums could probably better cover the load states.
@@ -47,24 +102,8 @@ pub struct App {
     data_chan: Chan<Data>,
     error_chan: Chan<Error>,
     fut: Option<JoinHandle<()>>,
-    modal: Modal,
-    status: Status,
-    query: String,
-    rows: DataList,
-    ctx_rows: Vec<String>
-}
-
-
-type Log = (i64, String);
-
-struct DataList {
-    pub items: Vec<Log>,
-    pub state: ListState
-}
-
-enum Data {
-    Logs(Vec<(i64, String)>),
-    Context(Vec<String>)
+    mode: Mode,
+    status: Status
 }
 
 enum Status {
@@ -81,15 +120,12 @@ impl App {
         let data_chan = channel::<Data>(10).into();
         let error_chan = channel::<Error>(10).into();
         let status = Status::Loading;
-        let rows = DataList { items: Vec::new(), state: ListState::default() };
-        let query = "".into();
         let fut = None;
-        let modal = Modal::Hidden;
-        let ctx_rows = Vec::new();
         let client = Arc::new(Mutex::new(client));
+        let mode = Mode::Searching(SearchState::default());
 
-        let mut res = Self { ctx_rows, modal, fut, running, event_stream, client, data_chan, error_chan, status, rows, query };
-        res.load_more();
+        let mut res = Self { mode, fut, running, event_stream, client, data_chan, error_chan, status };
+        res.load_more("".into());
 
         res
     }
@@ -124,8 +160,7 @@ impl App {
         }))
     }
 
-    fn load_more(&mut self) {
-        let q = self.query.clone();
+    fn load_more(&mut self, q: String) {
         self.load(|logs, data_tx, err_tx| async move  {
             let mut logs = logs.lock().await;
             logs.set_query(q);
@@ -159,11 +194,11 @@ impl App {
     }
 
     fn draw(&mut self, f: &mut Frame) {
-        match self.modal {
-            Modal::Visible(_) => {
-                self.draw_modal(f);
+        match &mut self.mode {
+            Mode::Viewing(ref mut v) => {
+                v.draw(f);
             }
-            Modal::Hidden => {
+            Mode::Searching(ref mut s) => {
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .margin(1)
@@ -176,9 +211,9 @@ impl App {
                         .as_ref(),
                     )
                     .split(f.area());
-                self.render_list(chunks[0], f);
+                s.draw(chunks[0], f);
 
-                let input_paragraph = Paragraph::new(self.query.clone())
+                let input_paragraph = Paragraph::new(s.query.clone()) // ARGH
                     .block(Block::default().borders(Borders::ALL).title("Query"));
                 f.render_widget(input_paragraph, chunks[1]);
 
@@ -193,30 +228,6 @@ impl App {
                 f.render_widget(status_line, chunks[2]);
             }
         }
-    }
-
-    fn render_list(&mut self, area: Rect, f: &mut Frame) {
-        let list_items: Vec<ListItem> = self.rows.items
-            .iter()
-            .map(|item| ListItem::from(item.1.clone()))
-            .collect();
-
-        let list = List::new(list_items)
-            .block(Block::default()
-            .borders(Borders::ALL)
-            .title("Results"))
-            .highlight_style(Style::new().bg(Color::DarkGray));
-        f.render_stateful_widget(list, area, &mut self.rows.state);
-    }
-
-    fn draw_modal(&self, f: &mut Frame) {
-        let area = popup_area(f.area(), 90, 90);
-        let block = Block::bordered().title("Modal");
-        let list = List::new(self.ctx_rows.iter().map(|row| {
-            ListItem::new(row.to_string())
-        })).block(block);
-        f.render_widget(Clear, area);
-        f.render_widget(list, area);
     }
 
     /// Reads the crossterm events and updates the state of [`App`].
@@ -247,16 +258,16 @@ impl App {
                 }
             }
             data = self.data_chan.rx.recv().fuse() => {
-                match data {
-                    Some(Data::Logs(logs)) => {
-                        self.rows.items = logs;
-                        self.rows.state.select_first();
+                match (&mut self.mode, data) {
+                    (Mode::Searching(ref mut s), Some(Data::Logs(logs))) => {
+                        s.items = logs;
+                        s.state.select_first();
                     },
-                    Some(Data::Context(ctx)) => {
-                        self.ctx_rows = ctx;
-                        self.rows.state.select_last();
+                    (Mode::Viewing(ref mut v), Some(Data::Context(ctx))) => {
+                        v.items = ctx;
+                        v.state.select_last();
                     },
-                    None => {}
+                    _ => {}
                 }
                 self.status = Status::Loaded;
             }
@@ -271,45 +282,35 @@ impl App {
 
     /// Handles the key events and updates the state of [`App`].
     fn on_key_event(&mut self, key: KeyEvent) {
-        match (key.modifiers, key.code) {
-            (_, KeyCode::Esc) => {
-                match self.modal {
-                    Modal::Hidden => self.quit(),
-                    Modal::Visible(_) => {
-                        self.modal = Modal::Hidden;
-                    }
-                }
+        match (&mut self.mode, key.code) {
+            (Mode::Searching(_), KeyCode::Esc) => {
                 self.quit();
             },
-            (_, KeyCode::Down) => {
-                if matches!(self.modal, Modal::Hidden) {
-                    self.rows.state.select_next();
-                }
-
+            (Mode::Viewing(vs), KeyCode::Esc) => {
+                let vs = std::mem::take(vs);
+                let ViewState { prev, items: _, state: _, selected_ts: _ } = vs;
+                self.mode = Mode::Searching(prev);
             },
-            (_, KeyCode::Up) => {
-                if matches!(self.modal, Modal::Hidden) {
-                    self.rows.state.select_previous();
-                }
+            (Mode::Searching(s), KeyCode::Down) => s.state.select_next(),
+            (Mode::Searching(s), KeyCode::Up) => s.state.select_previous(),
+            (Mode::Searching(s), KeyCode::Char(a)) => {
+                s.query.push(a);
+                let q = s.query.clone();
+                self.load_more(q);
             },
-            (_, KeyCode::Char(a)) => {
-                if matches!(self.modal, Modal::Hidden) {
-                    self.query.push(a);
-                    self.load_more();
-                }
+            (Mode::Searching(s), KeyCode::Backspace) => {
+                let _ = s.query.pop();
+                let q = s.query.clone();
+                self.load_more(q);
             },
-            (_, KeyCode::Backspace) => {
-                if matches!(self.modal, Modal::Hidden) {
-                    let _ = self.query.pop();
-                    self.load_more();
-                }
-            },
-            (_, KeyCode::Enter) => {
-                let selected = self.rows.state.selected();
-                if let Some(selected) = selected {
-                    let ts = self.rows.items[selected].0;
-                    self.modal = Modal::Visible(ts);
-                    self.load_context(ts);
+            (Mode::Searching(s), KeyCode::Enter) => {
+                let selected = s.state.selected();
+                if let Some(prev) = selected {
+                    let selected_ts = s.items[prev].0;
+                    let prev = std::mem::take(s);
+                    let vs = ViewState { prev, selected_ts, ..Default::default()};
+                    self.mode = Mode::Viewing(vs);
+                    self.load_context(selected_ts);
                 }
             },
             // Add other key handlers here.
