@@ -1,4 +1,5 @@
 use aws_sdk_cloudwatchlogs as cwl;
+use anyhow::Result;
 
 pub struct Logs {
     client: cwl::Client,
@@ -10,6 +11,7 @@ pub struct Logs {
     snip: usize
 }
 
+// TODO: Fix this junk
 async fn get_first_stream(client: &cwl::Client, group: &str) -> Option<String> {
     let req = client.describe_log_streams()
         .order_by(aws_sdk_cloudwatchlogs::types::OrderBy::LastEventTime)
@@ -30,21 +32,16 @@ impl Logs {
             None => get_first_stream(&client, &group).await.expect("Couldn't find stream"),
             Some(s) => s,
         };
-        let snip = match snip {
-            Some(s) => s,
-            None => 0
-        };
-        Self { client, group, query, next_token: None, stream, snip }
+        Self { client, group, query, next_token: None, stream, snip: snip.unwrap_or(0) }
     }
-
-
 
     pub fn set_query(&mut self, query: String) {
         self.query = Some(query);
         self.next_token = None;
     }
 
-    pub async fn find_context(&mut self, middle: i64) -> Vec<String> {
+    pub async fn find_context(&mut self, middle: i64) -> Result<Vec<String>> {
+        // TODO: Should this be configurable?
         let start_time = middle - 1000;
         let end_time = middle + 1000;
         let req = self.client.get_log_events()
@@ -53,25 +50,25 @@ impl Logs {
             .start_time(start_time)
             .end_time(end_time)
             .limit(40);
-        let res = req.send().await.unwrap();
+        let res = req.send().await?;
         let mut evts = Vec::new();
         for event in res.events() {
             if let Some(y) = event.message() {
                 evts.push(y.chars().skip(self.snip).collect());
             }
         }
-        evts
+        Ok(evts)
     }
 
-    // idk, should we handle back & forward? For now, assume ALWAYS FORWARD
-    pub async fn get_more_logs(&mut self) -> Vec<(i64, String)> {
+    pub async fn get_more_logs(&mut self) -> Result<Vec<(i64, String)>> {
         let req = self.client.filter_log_events()
             .log_group_name(&self.group)
             .set_log_stream_names(Some(vec![self.stream.clone()]))
-            .limit(40)
+            .limit(1000) // Probably could obviate the need for pagination with a suitably large ret 😈
             .set_filter_pattern(self.query.clone())
-            .set_next_token(self.next_token.clone());
-        let res = req.send().await.unwrap();
+            // Okay to take, considering we're about to put something else in, right?
+            .set_next_token(self.next_token.take());
+        let res = req.send().await?;
         self.next_token = res.next_token().map(|s| s.into());
         // What's more correct, returning an empty vec, or an option and acually dealing with it...
         let mut evts = Vec::new();
@@ -80,6 +77,6 @@ impl Logs {
                 evts.push((x, y.chars().skip(self.snip).collect()));
             }
         }
-        evts
+        Ok(evts)
     }
 }

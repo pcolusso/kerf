@@ -143,8 +143,8 @@ impl App {
     // Tried to simplify it, it would have to be defined as a trait, therefore a "Functor", which adds too much more complexity;
     // or via dynamic dispatch, but then we summon the pin demons.
     fn load<F, Fut>(&mut self, act: F)
-        where F: FnOnce(Z<Logs>, Sender<Data>, Sender<Error>) -> Fut + 'static + Send,
-              Fut: Future<Output = ()> + Send + 'static
+        where F: FnOnce(Z<Logs>) -> Fut + 'static + Send,
+              Fut: Future<Output = Result<Data>> + Send + 'static
     {
         self.status = Status::Loading;
         // Naive debouncing, we tack on a sleep to all load requests,
@@ -164,30 +164,28 @@ impl App {
         let logs = Arc::clone(&self.client);
         self.fut = Some(tokio::spawn(async move {
             sleep(Duration::from_millis(33)).await;
-            act(logs, data_tx, err_tx).await;
+            let res = act(logs).await;
+            match res {
+                Ok(d) => { data_tx.send(d).await.expect("Shitter's full"); },
+                Err(e) => { err_tx.send(e).await.expect("Shitter's full"); }
+            };
         }))
     }
 
     fn load_more(&mut self, q: String) {
-        self.load(|logs, data_tx, err_tx| async move  {
+        self.load(|logs| async move  {
             let mut logs = logs.lock().await;
             logs.set_query(q);
-            let result = logs.get_more_logs().await;
-            let wrapped = Data::Logs(result);
-            if let Err(e) = data_tx.send(wrapped).await {
-                err_tx.send(anyhow::anyhow!(e)).await.expect("Failed to send error, something's fucked!");
-            }
+            let result = logs.get_more_logs().await?;
+            Ok(Data::Logs(result))
         });
     }
 
     fn load_context(&mut self, ts: i64) {
-        self.load(move |logs, data_tx, err_tx| async move {
+        self.load(move |logs| async move {
             let mut logs = logs.lock().await;
-            let result = logs.find_context(ts).await;
-            let wrapped = Data::Context(result);
-            if let Err(e) = data_tx.send(wrapped).await {
-                err_tx.send(anyhow::anyhow!(e)).await.expect("Failed to send error, something's fucked!");
-            }
+            let result = logs.find_context(ts).await?;
+            Ok(Data::Context(result))
         });
     }
 
