@@ -282,8 +282,12 @@ impl App {
             },
             (Mode::Searching(s), KeyCode::Down) => s.state.select_next(),
             (Mode::Searching(s), KeyCode::Up) => s.state.select_previous(),
+            (Mode::Searching(s), KeyCode::Left) => s.state.select_first(),
+            (Mode::Searching(s), KeyCode::Right) => s.state.select_last(),
             (Mode::Viewing(v), KeyCode::Down) => v.state.select_next(),
             (Mode::Viewing(v), KeyCode::Up) => v.state.select_previous(),
+            (Mode::Viewing(v), KeyCode::Right) => v.state.select_last(),
+            (Mode::Viewing(v), KeyCode::Left) => v.state.select_first(),
             (Mode::Searching(s), KeyCode::Char(a)) if a.is_alphanumeric() => {
                 s.query.push(a);
                 let q = s.query.clone();

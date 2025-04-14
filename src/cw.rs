@@ -12,19 +12,19 @@ pub struct Logs {
 }
 
 // TODO: Fix this junk
-async fn get_first_stream(client: &cwl::Client, group: &str) -> Option<String> {
+async fn get_first_stream(client: &cwl::Client, group: &str) -> Result<String> {
     let req = client.describe_log_streams()
         .order_by(aws_sdk_cloudwatchlogs::types::OrderBy::LastEventTime)
         .descending(true)
         .log_group_name(group)
         .limit(1);
-    let res = req.send().await.unwrap();
-    res.log_streams()[0].log_stream_name().map(|s| s.to_owned())
+    let res = req.send().await?;
+    res.log_streams()[0].log_stream_name().map(|s| s.to_owned()).ok_or(anyhow::anyhow!("Can't find a log stream."))
 }
 
 // This looks a lot like an iterator, or a cursor...
 impl Logs {
-    pub async fn new(group: String, stream: Option<String>, snip: Option<usize>) -> Self {
+    pub async fn new(group: String, stream: Option<String>, snip: Option<usize>) -> Result<Self> {
         let config = aws_config::load_from_env().await;
         let client = cwl::Client::new(&config);
         let query = None;
@@ -32,7 +32,7 @@ impl Logs {
             None => get_first_stream(&client, &group).await.expect("Couldn't find stream"),
             Some(s) => s,
         };
-        Self { client, group, query, next_token: None, stream, snip: snip.unwrap_or(0) }
+        Ok(Self { client, group, query, next_token: None, stream, snip: snip.unwrap_or(0) })
     }
 
     pub fn set_query(&mut self, query: String) {
@@ -66,6 +66,7 @@ impl Logs {
             .set_log_stream_names(Some(vec![self.stream.clone()]))
             .limit(1000) // Probably could obviate the need for pagination with a suitably large ret 😈
             .set_filter_pattern(self.query.clone())
+            
             // Okay to take, considering we're about to put something else in, right?
             .set_next_token(self.next_token.take());
         let res = req.send().await?;
